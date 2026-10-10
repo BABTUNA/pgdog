@@ -125,6 +125,42 @@ async fn transaction_time_update_statement_rewrites() {
     assert!(transaction_start_time == row_tt_extended_protocol_time);
 }
 
+/// Verify that usage of now() / CURRENT_TIMESTAMP in a DELETE statement uses transaction time re-writes.
+#[tokio::test]
+async fn transaction_time_delete_statement_rewrites() {
+    let conn = connections_sqlx().await;
+    let conn = conn.get(1).unwrap();
+
+    let mut transaction = conn.begin().await.unwrap();
+
+    // Both rows get the transaction time from the INSERT rewrite.
+    for id in [7001, 7002] {
+        transaction
+            .execute(format!("INSERT INTO sharded(id) VALUES ({id})").as_str())
+            .await
+            .unwrap();
+    }
+
+    // Each shard would compare against its own transaction start time without the rewrite,
+    // and match nothing.
+    let deleted_extended_protocol: PgRow = transaction
+        .fetch_one("DELETE FROM sharded WHERE id = 7001 AND created_at = NOW() RETURNING id")
+        .await
+        .unwrap();
+
+    let deleted_simple_protocol: PgRow = sqlx::raw_sql(
+        "DELETE FROM sharded WHERE id = 7002 AND created_at = CURRENT_TIMESTAMP RETURNING id",
+    )
+    .fetch_one(&mut *transaction)
+    .await
+    .unwrap();
+
+    assert_eq!(deleted_extended_protocol.get::<i64, _>("id"), 7001);
+    assert_eq!(deleted_simple_protocol.get::<i64, _>("id"), 7002);
+
+    transaction.rollback().await.unwrap();
+}
+
 /// Ensure that SELECT now() and CURRENT_TIMESTAMP return the correct type, are consistent
 /// within a transaction across multiple queries, and return within the correct column name
 /// despite being re-written.

@@ -350,14 +350,18 @@ impl StatementRewrite<'_> {
 
             // Replaces all non-deterministic function calls (ParamRef or String)
             nd_rewrite.transform_func_calls_in_insert(stmt, &insert_context)?;
-        } else if matches!(stmt, NodeMut::SelectStmt(_) | NodeMut::UpdateStmt(_)) {
+        } else if matches!(
+            stmt,
+            NodeMut::SelectStmt(_) | NodeMut::UpdateStmt(_) | NodeMut::DeleteStmt(_)
+        ) {
             // Still rewrite other kind of statements that use ND functions that
             // are reliant on transaction start time
 
             let statement_type = match stmt {
                 NodeMut::SelectStmt(_) => StatementType::Select,
                 NodeMut::UpdateStmt(_) => StatementType::Update,
-                _ => panic!("only select and update covered"),
+                NodeMut::DeleteStmt(_) => StatementType::Delete,
+                _ => panic!("only select, update and delete covered"),
             };
 
             let mut nd_rewrite = NDRewrite {
@@ -375,7 +379,8 @@ impl StatementRewrite<'_> {
             match stmt {
                 NodeMut::SelectStmt(select_stmt) => transform_tt.transform_select_stmt(select_stmt),
                 NodeMut::UpdateStmt(update_stmt) => transform_tt.transform_update_stmt(update_stmt),
-                _ => panic!("only select and update covered"),
+                NodeMut::DeleteStmt(delete_stmt) => transform_tt.transform_delete_stmt(delete_stmt),
+                _ => panic!("only select, update and delete covered"),
             }
 
             return transform_tt.outer_error.map(Err).unwrap_or(Ok(()));
@@ -434,6 +439,7 @@ enum StatementType {
     Insert,
     Select,
     Update,
+    Delete,
 }
 
 /// Extra context necessary for re-writing INSERT statements, where we need
@@ -467,7 +473,9 @@ impl<'mem, 'a, 's> NDRewrite<'mem, 'a, 's> {
 
             match self.statement_type {
                 StatementType::Insert | StatementType::Update => constant_text_node,
-                StatementType::Select => self
+                // DELETE only has WHERE and RETURNING, where the literal has no
+                // column to take its type from.
+                StatementType::Select | StatementType::Delete => self
                     .mem
                     .make_type_cast(
                         constant_text_node,
@@ -505,5 +513,77 @@ impl<'mem, 'a, 's> NDRewrite<'mem, 'a, 's> {
                 )
                 .uncast()
         })
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use chrono::{TimeZone, Utc};
+    use pg_raw_parse::{deparse, make};
+
+    use super::*;
+    use crate::backend::ShardingSchema;
+    use crate::backend::schema::Schema;
+    use crate::frontend::PreparedStatements;
+    use crate::frontend::router::parser::StatementRewriteContext;
+
+    fn rewrite(sql: &str, extended: bool) -> (String, usize) {
+        let ast = pg_raw_parse::parse(sql).unwrap();
+        let schema = ShardingSchema::default();
+        let db_schema = Schema::default();
+        let mut prepared_statements = PreparedStatements::default();
+        let start = Utc.with_ymd_and_hms(2026, 10, 9, 12, 0, 0).unwrap();
+        let mut rewrite = StatementRewrite::new(StatementRewriteContext {
+            extended,
+            prepared: false,
+            prepared_statements: &mut prepared_statements,
+            schema: &schema,
+            db_schema: &db_schema,
+            user: "test",
+            search_path: None,
+            timezone: None,
+            query_timestamps: QueryTimestamps {
+                transaction_start: start,
+                statement_start: start,
+            },
+        });
+
+        let mut bind_params = BindParams::default();
+        let raw = (&*ast).into_iter().next().unwrap();
+        let rewritten = make::owned(|mem| {
+            let mut raw = mem.make_unique(raw);
+            rewrite
+                .rewrite_nd_functions(raw.as_mut().stmt_mut(), mem, &mut bind_params)
+                .unwrap();
+            raw
+        });
+
+        (
+            deparse(&*rewritten).unwrap().as_str().to_owned(),
+            bind_params.len(),
+        )
+    }
+
+    #[test]
+    fn test_delete_transaction_time_simple() {
+        let (sql, params) = rewrite(
+            "DELETE FROM t WHERE created_at < now() - interval '1 day' RETURNING now()",
+            false,
+        );
+        assert_eq!(
+            sql,
+            "DELETE FROM t WHERE created_at < '2026-10-09 12:00:00+00'::timestamptz - '1 day'::interval RETURNING '2026-10-09 12:00:00+00'::timestamptz AS now"
+        );
+        assert_eq!(params, 0);
+    }
+
+    #[test]
+    fn test_delete_transaction_time_extended() {
+        let (sql, params) = rewrite("DELETE FROM t WHERE created_at < now()", true);
+        assert_eq!(
+            sql,
+            "DELETE FROM t WHERE created_at < $1::pg_catalog.text::timestamptz"
+        );
+        assert_eq!(params, 1);
     }
 }
