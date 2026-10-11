@@ -60,6 +60,12 @@ SELECT * FROM users WHERE id = 1;
 SELECT * FROM payments WHERE user_id = 1;
 ```
 
+To try the [admin database](https://docs.pgdog.dev/administration/), connect to `admin` and run commands like `SHOW POOLS`:
+
+```
+PGPASSWORD=admin psql -h 127.0.0.1 -p 6432 -U admin admin
+```
+
 ## Features
 
 &#128216; **[Configuration](https://docs.pgdog.dev/configuration/)**
