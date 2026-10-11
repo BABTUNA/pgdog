@@ -267,6 +267,19 @@ impl Client {
     }
 
     /// Create new frontend client from the given TCP stream.
+    /// Send the first auth request for `auth_type` and read the client's answer
+    /// without checking it. Returns `false` if the client hung up.
+    async fn request_password(stream: &mut Stream, user: &str, auth_type: &AuthType) -> bool {
+        let request = match auth_type {
+            AuthType::Md5 => md5::Client::new(user, &[]).challenge(),
+            AuthType::Scram => scram_challenge(stream.tls_server_end_point()),
+            AuthType::Plain | AuthType::ExternalToken => Authentication::ClearTextPassword,
+            AuthType::Trust => return true,
+        };
+
+        stream.send_flush(&request).await.is_ok() && stream.read().await.is_ok()
+    }
+
     async fn login(
         mut stream: Stream,
         params: Parameters,
@@ -358,7 +371,15 @@ impl Client {
                     }
                 }
 
-                Err(_) => AuthResult::NoUserOrDatabase,
+                Err(_) => {
+                    // Ask for a password before rejecting, like Postgres. Health checks
+                    // (e.g. HAProxy pgsql-check) expect an auth request, and an
+                    // immediate error tells the client the user or database doesn't exist.
+                    if !Self::request_password(&mut stream, user, &auth_type).await {
+                        return Ok(None);
+                    }
+                    AuthResult::NoUserOrDatabase
+                }
             }
         };
 
