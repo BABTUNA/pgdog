@@ -12,6 +12,11 @@ name = "pgdog"
 database = "pgdog_sharded"
 password = "pgdog"
 
+# Example: read the password from a file, e.g. a Docker secret, instead of `password`.
+# Trailing newlines are removed. Like `password`, also used for server connections
+# unless `server_password` is set.
+# password_file = "/run/secrets/pgdog_password"
+
 # Example: backend authentication with AWS RDS IAM token generation.
 # PgDog still authenticates the client as configured by `general.auth_type`;
 # this only affects how PgDog authenticates to PostgreSQL servers.

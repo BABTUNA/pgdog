@@ -92,6 +92,11 @@ impl ConfigAndUsers {
             Users::default()
         };
 
+        if let Err(err) = users.load_password_files() {
+            error!("failed to load {}: {}", users_path.display(), err);
+            return Err(err);
+        }
+
         // Override admin set in pgdog.toml
         // with what's in users.toml.
         if let Some(admin) = users.admin.take() {
@@ -763,6 +768,26 @@ mod tests {
 
     /// `has_database` must answer for one name exactly what `user_databases`
     /// expands to, or the pooler and the views that ask per name disagree.
+    #[test]
+    fn test_load_password_file() {
+        let mut password_file = NamedTempFile::new().unwrap();
+        password_file.write_all(b"s3cret\n").unwrap();
+        password_file.flush().unwrap();
+
+        let mut users_file = NamedTempFile::new().unwrap();
+        write!(
+            users_file,
+            "[[users]]\nname = \"alice\"\ndatabase = \"production\"\npassword_file = \"{}\"\n",
+            password_file.path().display()
+        )
+        .unwrap();
+        users_file.flush().unwrap();
+
+        let loaded =
+            ConfigAndUsers::load(Path::new("/does/not/exist.toml"), users_file.path()).unwrap();
+        assert_eq!(loaded.users.users[0].password.as_deref(), Some("s3cret"));
+    }
+
     #[test]
     fn has_database_agrees_with_user_databases() {
         let database = |name: &str| Database {

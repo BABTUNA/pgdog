@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::env;
 use std::fmt::Display;
+use std::fs::read_to_string;
 use std::path::PathBuf;
 use std::sync::LazyLock;
 use tracing::warn;
@@ -8,7 +9,7 @@ use tracing::warn;
 use super::core::Config;
 use super::pooling::PoolerMode;
 use crate::util::random_string;
-use crate::{AuthType, RoleConfig};
+use crate::{AuthType, Error, RoleConfig};
 use schemars::JsonSchema;
 
 /// Plugins are dynamically loaded at PgDog startup. These settings control which plugins are loaded.
@@ -47,6 +48,29 @@ pub struct Users {
 }
 
 impl Users {
+    /// Read `password_file` into `password` for users that set it.
+    pub fn load_password_files(&mut self) -> Result<(), Error> {
+        for user in &mut self.users {
+            let Some(path) = &user.password_file else {
+                continue;
+            };
+
+            if user.password.is_some() {
+                return Err(Error::PasswordFile(format!(
+                    r#"user "{}" (database "{}") sets both "password" and "password_file""#,
+                    user.name, user.database
+                )));
+            }
+
+            let password = read_to_string(path).map_err(|err| {
+                Error::PasswordFile(format!(r#"failed to read "{}": {}"#, path.display(), err))
+            })?;
+            user.password = Some(password.trim_end_matches(['\r', '\n']).to_string());
+        }
+
+        Ok(())
+    }
+
     /// Run configuration checks.
     pub fn check(&mut self, config: &Config) {
         for user in &mut self.users {
@@ -296,6 +320,8 @@ pub struct User {
     ///
     /// <https://docs.pgdog.dev/configuration/users.toml/users/#password>
     pub password: Option<String>,
+    /// Read `password` from this file instead, e.g. a Docker secret. Trailing newlines are removed.
+    pub password_file: Option<PathBuf>,
     /// Multiple passwords for this user, all of which will be attempted during auth to server and client.
     #[serde(default)]
     pub passwords: Vec<String>,
@@ -907,6 +933,50 @@ vault_refresh_percent = 60
         config.general.auth_type = AuthType::ExternalToken;
         assert!(!user(None).requires_password(&config));
         assert!(user(Some(AuthType::Scram)).requires_password(&config));
+    }
+
+    #[test]
+    fn test_password_file() {
+        use std::io::Write;
+
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        writeln!(file, "s3cret").unwrap();
+
+        let user = |password: Option<&str>, password_file: Option<PathBuf>| User {
+            name: "alice".into(),
+            database: "db".into(),
+            password: password.map(String::from),
+            password_file,
+            ..Default::default()
+        };
+
+        let mut users = Users {
+            users: vec![
+                user(None, Some(file.path().into())),
+                user(Some("inline"), None),
+            ],
+            ..Default::default()
+        };
+        users.load_password_files().unwrap();
+        assert_eq!(users.users[0].password.as_deref(), Some("s3cret"));
+        assert_eq!(users.users[1].password.as_deref(), Some("inline"));
+
+        let mut users = Users {
+            users: vec![user(Some("inline"), Some(file.path().into()))],
+            ..Default::default()
+        };
+        let err = users.load_password_files().unwrap_err().to_string();
+        assert!(
+            err.contains(r#"sets both "password" and "password_file""#),
+            "{err}"
+        );
+
+        let mut users = Users {
+            users: vec![user(None, Some("/does/not/exist".into()))],
+            ..Default::default()
+        };
+        let err = users.load_password_files().unwrap_err().to_string();
+        assert!(err.contains(r#"failed to read "/does/not/exist""#), "{err}");
     }
 
     #[test]

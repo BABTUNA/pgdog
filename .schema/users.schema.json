@@ -249,6 +249,13 @@
             "null"
           ]
         },
+        "password_file": {
+          "description": "Read `password` from this file instead, e.g. a Docker secret. Trailing newlines are removed.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "password_hash": {
           "description": "Passwords hash. Can be used to validate user logins without storing passwords in users.toml.\nServer authentication must use RDS IAM or some other passwordless authentication, e.g. trust.",
           "type": [

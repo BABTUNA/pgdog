@@ -28,6 +28,9 @@ pub enum Error {
 
     #[error("parse error: {0}")]
     ParseError(String),
+
+    #[error("password_file: {0}")]
+    PasswordFile(String),
 }
 
 impl Error {
