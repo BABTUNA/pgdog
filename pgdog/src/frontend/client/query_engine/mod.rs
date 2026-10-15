@@ -274,13 +274,8 @@ impl QueryEngine {
                     .await?
             }
             Command::Listen { channel, shard } => {
-                self.listen(
-                    context,
-                    &client_request.messages,
-                    &channel.clone(),
-                    shard.clone(),
-                )
-                .await?
+                self.listen(context, client_request, &channel.clone(), shard.clone())
+                    .await?
             }
             Command::Notify {
                 channel,
@@ -289,7 +284,7 @@ impl QueryEngine {
             } => {
                 self.notify(
                     context,
-                    &client_request.messages,
+                    client_request,
                     &channel.clone(),
                     &payload.clone(),
                     &shard.clone(),
