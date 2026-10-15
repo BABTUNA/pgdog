@@ -187,6 +187,11 @@ impl Table {
         Columns::new(self.columns.iter().enumerate().filter(|(_, c)| c.identity))
     }
 
+    /// Every column is part of the identity.
+    fn key_only(&self) -> bool {
+        self.columns.iter().all(|c| c.identity)
+    }
+
     fn non_identity_columns(
         &self,
     ) -> Columns<'_, impl Iterator<Item = (usize, &PublicationTableColumn)>> {
@@ -237,6 +242,18 @@ impl Table {
     /// The related [bind](crate::net::messages::replication::TupleData::to_bind) should set all
     /// the values in the default column order
     pub(crate) fn upsert(&self) -> String {
+        // Every column is in the key: a conflicting row is already identical.
+        if self.key_only() {
+            return format!(
+                "INSERT INTO \"{}\".\"{}\" ({}) VALUES ({}) ON CONFLICT ({}) DO NOTHING",
+                escape_identifier(self.table.destination_schema()),
+                escape_identifier(self.table.destination_name()),
+                self.all_columns().into_names(),
+                self.all_columns().into_placeholders(),
+                self.identity_columns().into_names(),
+            );
+        }
+
         format!(
             "INSERT INTO \"{}\".\"{}\" ({}) VALUES ({}) ON CONFLICT ({}) DO UPDATE SET {}",
             escape_identifier(self.table.destination_schema()),
@@ -253,11 +270,19 @@ impl Table {
     /// The related [bind](crate::net::messages::replication::TupleData::to_bind) should set all
     /// the values in the default column order
     pub(crate) fn update(&self) -> String {
+        // Every column is in the key, so an UPDATE that keeps the key changes nothing.
+        // Set the key to itself to keep the statement valid and bind every column.
+        let assignments = if self.key_only() {
+            self.identity_columns().into_assignments()
+        } else {
+            self.non_identity_columns().into_assignments()
+        };
+
         format!(
             "UPDATE \"{}\".\"{}\" SET {} WHERE {}",
             escape_identifier(self.table.destination_schema()),
             escape_identifier(self.table.destination_name()),
-            self.non_identity_columns().into_assignments(),
+            assignments,
             self.identity_columns().into_predicates(),
         )
     }
@@ -561,6 +586,29 @@ mod test {
             table.update(),
             r#"UPDATE "public"."test_table" SET "name" = $2, "value" = $3 WHERE "id" = $1"#,
         );
+    }
+
+    #[test]
+    fn test_key_only_table() {
+        let table = make_table(vec![("a", true), ("b", true)]);
+
+        assert_eq!(
+            table.upsert(),
+            r#"INSERT INTO "public"."test_table" ("a", "b") VALUES ($1, $2) ON CONFLICT ("a", "b") DO NOTHING"#
+        );
+        assert_eq!(
+            table.update(),
+            r#"UPDATE "public"."test_table" SET "a" = $1, "b" = $2 WHERE "a" = $1 AND "b" = $2"#
+        );
+
+        for sql in [
+            table.insert(),
+            table.upsert(),
+            table.update(),
+            table.delete(),
+        ] {
+            assert!(parse(&sql).is_ok(), "invalid SQL: {sql}");
+        }
     }
 
     #[test]
